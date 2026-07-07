@@ -11,6 +11,11 @@ Two parts every evening:
 - **Spotlight** — one repo per day (rotating by day of year) gets a full
   read-through: dead code, naming, error handling, structure. Every repo
   comes up every couple of weeks.
+- **Portfolio** (Sundays) — keep/finish/archive/delete advice for the
+  whole account from each repo's metadata: what looks stalled but worth
+  completing, what's a stale experiment or duplicate, what's healthy.
+  On demand any day:
+  `gh workflow run repo-review.yml -R astroboy1183/repo-review -f curate=1`
 
 Always sends — a quiet coding day still gets the spotlight.
 

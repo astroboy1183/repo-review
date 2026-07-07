@@ -9,6 +9,8 @@ my GitHub account:
   - a rotating SPOTLIGHT: one repo per day gets a full read-through
     (dead code, naming, error handling, structure), so every repo gets a
     deep review every couple of weeks
+  - on Sundays (or with REVIEW_CURATE=1): a PORTFOLIO section — which
+    repos to keep, which to finish, which to archive or delete
   - one small suggestion for tomorrow
 
 Always sends — a quiet coding day still gets the spotlight review.
@@ -37,6 +39,7 @@ MAX_COMMITS_PER_REPO = 20  # a busier day than this reviews the newest 20
 MAX_DIFF_CHARS = 8000  # per repo; keeps the prompt size sane
 MAX_SPOTLIGHT_FILES = 12
 MAX_SPOTLIGHT_CHARS = 30000
+CURATION_WEEKDAY = 6  # Sunday — keep/finish/delete advice changes slowly
 SOURCE_EXT = (".py", ".sql", ".sh", ".js", ".ts", ".yml", ".yaml", ".toml", ".md")
 
 
@@ -116,7 +119,18 @@ def spotlight_source(repo):
     return "\n\n".join(picked)
 
 
-def build_prompt(changed, spot_name, spot_src):
+def repo_inventory(repos):
+    """One metadata line per repo — enough to judge keep/finish/delete."""
+    return "\n".join(
+        f"- {r['name']} | {r.get('language') or 'no code detected'} | "
+        f"{(r.get('description') or '(no description)')[:80]} | "
+        f"created {r['created_at'][:10]} | last push {r['pushed_at'][:10]} | "
+        f"{r['size']} KB | {r['open_issues_count']} open issues"
+        for r in repos
+    )
+
+
+def build_prompt(changed, spot_name, spot_src, inventory=None):
     change_blocks = [
         f"=== {name} — commits: {'; '.join(subjects)} ===\n{diff}"
         for name, subjects, diff in changed
@@ -130,6 +144,12 @@ def build_prompt(changed, spot_name, spot_src):
         + "\n\n".join(change_blocks)
         + f"\n\n=== INPUT 2: source of today's spotlight repo, {spot_name} ===\n\n"
         + (spot_src or "(unavailable)")
+        + (
+            "\n\n=== INPUT 3: full repo inventory (weekly portfolio check) ===\n\n"
+            + inventory
+            if inventory
+            else ""
+        )
         + "\n\nProduce EXACTLY this output structure:\n\n"
         "🔎 TODAY'S CHANGES\n"
         "Per repo with commits: 2-4 specific review bullets drawn from the "
@@ -142,7 +162,21 @@ def build_prompt(changed, spot_name, spot_src):
         "then the highest-value concrete improvements (dead code, naming, "
         "error handling, structure, missing tests) with file references. "
         "End the section with the single change you would make first.\n\n"
-        "Close with ONE small, concrete suggestion for tomorrow."
+        + (
+            "🗂 PORTFOLIO\n"
+            "From the inventory, judged by name, description, size and last "
+            "push:\n"
+            "FINISH — up to 5 repos that look started-but-stalled yet worth "
+            "completing, each with one line on what done would look like.\n"
+            "ARCHIVE/DELETE — up to 8 candidates (stale experiments, empty "
+            "repos, likely duplicates — flag near-identical names), each "
+            "with a one-line reason; say DELETE only for the truly "
+            "disposable, ARCHIVE when in doubt.\n"
+            "KEEP — one closing line: how many look healthy and why.\n\n"
+            if inventory
+            else ""
+        )
+        + "Close with ONE small, concrete suggestion for tomorrow."
     )
 
 
@@ -174,13 +208,24 @@ def main():
             spot = None
     spot_name = spot["name"] if spot else "(unavailable)"
 
-    body = ask_llm(build_prompt(changed, spot_name, spot_src), max_tokens=1800)
+    curate = (
+        datetime.now(IST).weekday() == CURATION_WEEKDAY
+        or bool(os.environ.get("REVIEW_CURATE"))
+    )
+    body = ask_llm(
+        build_prompt(
+            changed, spot_name, spot_src, repo_inventory(repos) if curate else None
+        ),
+        max_tokens=2500 if curate else 1800,
+    )
     if failed:
         body += "\n\n⚠️ Could not check: " + ", ".join(failed)
 
     header = (
         f"🔍 Repo review — {datetime.now(IST):%a %d %b %Y}\n"
-        f"({len(changed)} repos with commits today, spotlight: {spot_name})\n\n"
+        f"({len(changed)} repos with commits today, spotlight: {spot_name}"
+        + (", weekly portfolio check" if curate else "")
+        + ")\n\n"
     )
     send_telegram(header + body)
 

@@ -10,7 +10,12 @@ on:
     # run when the primary already handled today, so it only delivers when
     # the primary was dropped — or failed, making it a retry too.
     - cron: '7 15 * * *'
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      curate:
+        description: 'Include portfolio keep/finish/delete advice (1 = yes)'
+        default: ''
+        required: false
 
 permissions:
   contents: read
@@ -64,6 +69,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPOS_READ_TOKEN: ${{ secrets.REPOS_READ_TOKEN }}
+          REVIEW_CURATE: ${{ inputs.curate || '' }}
         run: |
           # Fail-soft until the PAT exists: no red runs during setup.
           if [ -z "$REPOS_READ_TOKEN" ]; then
