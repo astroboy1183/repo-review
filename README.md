@@ -20,7 +20,7 @@ Two parts every evening:
 Always sends — a quiet coding day still gets the spotlight.
 
 Part of the personal-agents fleet (`[gather] → [summarize] → [Telegram]`):
-own repo, own schedule, fails alone. Delivery via the morning bot.
+own repo, own schedule, fails alone. One agent, one task, one bot.
 
 - Schedule: `.github/workflows/repo-review.yml`
   (`7 14 * * *` UTC = 19:37 IST; backup 20:37 with dedupe guard)

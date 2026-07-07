@@ -8,13 +8,14 @@ schedules and fail independently.
 import os
 
 import requests
-from anthropic import Anthropic
 
 TELEGRAM_CHUNK = 4000  # Telegram's hard limit is 4096 chars per message
 
 
 def ask_llm(prompt, model="claude-haiku-4-5", max_tokens=2000):
     """Single-turn model call; returns the text response."""
+    from anthropic import Anthropic  # deferred: send-only agents skip the dep
+
     client = Anthropic()  # ANTHROPIC_API_KEY from environment
     response = client.messages.create(
         model=model,
