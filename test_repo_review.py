@@ -4,11 +4,14 @@
 Everything the module would fetch from GitHub or the LLM is stubbed with
 synthetic data, so these run anywhere with `python3 test_repo_review.py`.
 
-Covers the three fixes:
+Covers:
   (a) spotlight rotation is stable/deterministic regardless of input order,
       and cycles every repo exactly once per len(repos) days;
   (b) real code is preferred over docs/config in the spotlight file pick;
-  (c) the "(newest 20 commits only)" note appears when the cap is hit.
+  (c) the "(newest 20 commits only)" note appears when the cap is hit;
+  (d) identical diffs across repos collapse into one review entry;
+  (e) over-budget diffs are trimmed at file boundaries, code first;
+  (f) the memory tail is split off the message and survives garbage.
 """
 
 import unittest
@@ -72,9 +75,11 @@ class RotationTest(unittest.TestCase):
             "day_diff": lambda r, since: None,        # quiet day everywhere
             "spotlight_source": lambda r: f"SRC:{r['name']}",
             "repo_inventory": lambda rs: "INV",
-            "ask_llm": lambda prompt, max_tokens=0: "BODY",
+            "ask_llm": lambda prompt, max_tokens=0, model="": "BODY",
             "send_telegram": fake_send,
             "datetime": make_fixed_datetime(fixed),
+            "load_state": lambda: {"daily": [], "spotlights": {}},
+            "save_state": lambda s: None,             # tests must not touch disk
         }
         saved = {k: getattr(rr, k) for k in patches}
         for k, v in patches.items():
@@ -183,8 +188,83 @@ class CapNoteTest(unittest.TestCase):
 
     def test_note_surfaces_in_prompt(self):
         changed = [("proj", ["m1", "m2"], "diff...", " (newest 20 commits only)")]
-        prompt = rr.build_prompt(changed, "proj", "SRC", inventory=None)
+        prompt = rr.build_changes_prompt(changed, {})
         self.assertIn("(newest 20 commits only)", prompt)
+
+
+# --- (d) identical-diff dedupe -----------------------------------------------
+
+class DedupeTest(unittest.TestCase):
+
+    def test_identical_diffs_collapse(self):
+        same = "diff --git a/agentlib.py b/agentlib.py\n-old\n+new\n"
+        changed = [
+            ("alpha", ["sync"], same, ""),
+            ("bravo", ["sync"], same, ""),
+            ("charlie", ["own change"], "diff --git a/x b/x\n+y\n", ""),
+            ("delta", ["sync"], same, ""),
+        ]
+        out = rr.dedupe_changed(changed)
+        self.assertEqual(len(out), 2)
+        merged = out[0][0]
+        self.assertIn("alpha", merged)
+        self.assertIn("(same diff in 2 more: bravo, delta)", merged)
+        self.assertEqual(out[1][0], "charlie")  # unique entry untouched
+
+    def test_unique_diffs_pass_through(self):
+        changed = [
+            ("alpha", ["a"], "diff --git a/1 b/1\n+a\n", ""),
+            ("bravo", ["b"], "diff --git a/2 b/2\n+b\n", ""),
+        ]
+        self.assertEqual(rr.dedupe_changed(changed), changed)
+
+
+# --- (e) diff trimming --------------------------------------------------------
+
+class TrimDiffTest(unittest.TestCase):
+
+    @staticmethod
+    def _section(path, filler):
+        return f"diff --git a/{path} b/{path}\n" + filler + "\n"
+
+    def test_under_budget_untouched(self):
+        diff = self._section("app.py", "+x" * 10)
+        self.assertEqual(rr.trim_diff(diff, budget=1000), diff)
+
+    def test_code_kept_docs_dropped_with_note(self):
+        docs = self._section("README.md", "+d" * 300)
+        code = self._section("app.py", "+c" * 100)
+        out = rr.trim_diff(docs + code, budget=250)
+        self.assertIn("app.py", out)
+        self.assertNotIn("+d" * 300, out)
+        self.assertIn("1 file diffs omitted", out)
+
+    def test_single_oversized_diff_falls_back_to_hard_cut(self):
+        big = self._section("app.py", "+c" * 5000)
+        out = rr.trim_diff(big, budget=200)
+        self.assertTrue(out.startswith("diff --git a/app.py"))
+        self.assertIn("truncated for size", out)
+
+
+# --- (f) memory tail ----------------------------------------------------------
+
+class SplitStateTest(unittest.TestCase):
+
+    def test_splits_message_and_json(self):
+        reply = f'the review\n{rr.STATE_MARKER}\n{{"proj": "one bug"}}'
+        text, mem = rr.split_state(reply)
+        self.assertEqual(text, "the review")
+        self.assertEqual(mem, {"proj": "one bug"})
+
+    def test_no_marker_means_no_memory(self):
+        text, mem = rr.split_state("just a review")
+        self.assertEqual((text, mem), ("just a review", {}))
+
+    def test_garbage_tail_costs_memory_not_message(self):
+        reply = f"the review\n{rr.STATE_MARKER}\n{{not json"
+        text, mem = rr.split_state(reply)
+        self.assertEqual(text, "the review")
+        self.assertEqual(mem, {})
 
 
 if __name__ == "__main__":

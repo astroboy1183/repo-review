@@ -16,9 +16,13 @@ on:
         description: 'Include portfolio keep/finish/delete advice (1 = yes)'
         default: ''
         required: false
+      spotlight:
+        description: 'Force this repo as today''s spotlight (bare repo name)'
+        default: ''
+        required: false
 
 permissions:
-  contents: read
+  contents: write  # the run commits its review memory (state/) back here
   actions: read  # guard step lists today's runs
 
 jobs:
@@ -70,6 +74,11 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           REPOS_READ_TOKEN: ${{ secrets.REPOS_READ_TOKEN }}
           REVIEW_CURATE: ${{ inputs.curate || '' }}
+          REVIEW_SPOTLIGHT: ${{ inputs.spotlight || '' }}
+          # optional model overrides; code defaults are haiku (daily diffs)
+          # and sonnet (spotlight/portfolio deep read)
+          REVIEW_MODEL_DAILY: ${{ secrets.REVIEW_MODEL_DAILY }}
+          REVIEW_MODEL_DEEP: ${{ secrets.REVIEW_MODEL_DEEP }}
         run: |
           # Fail-soft until the PAT exists: no red runs during setup.
           if [ -z "$REPOS_READ_TOKEN" ]; then
@@ -77,6 +86,20 @@ jobs:
             exit 0
           fi
           python repo_review.py
+
+      - name: Persist review memory
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          # Best-effort: losing the memory costs tomorrow's context, never
+          # today's review (which already went out).
+          if [ -n "$(git status --porcelain state/)" ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state/
+            git commit -m "Update review memory"
+            git pull --rebase -q origin main || true
+            git push || echo "memory push failed (non-fatal)"
+          fi
 
 
       - name: Alert on failure

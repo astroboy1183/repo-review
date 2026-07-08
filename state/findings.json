@@ -1,0 +1,32 @@
+{
+ "daily": [
+  {
+   "date": "2026-07-08",
+   "findings": {
+    "astroboy1183": "No findings; cleanly registers local agents and finance-tracker in fleet.",
+    "common": "No findings; tidy single-responsibility agentlib module.",
+    "cricket-scores": "No findings; three-way signal (dead/quiet/scores) cleanly implemented.",
+    "daily-review": "Three style/risk findings: subprocess stderr not logged, UTC vs IST timezone parsing in grace window, jitter rationale undocumented.",
+    "eng-blogs": "Style: feed errors conflate timeout/network with HTTP status; separate in failure list.",
+    "finance-tracker": "Style: comment needed to explain why empty secret requires `or` fallback.",
+    "fleet": "No findings; devcontainer and clone script coherent.",
+    "housekeeper": "Risk: vault stale-days check uses redundant AND when dirty-and-old alone should alert.",
+    "mail-digest": "Risk: vip_block() assumes e['vip'] always present; style: _LINK_RE pattern undocumented.",
+    "markets-brief": "Risk: query1/query2 fallback conflates different exceptions; log both for diagnostics.",
+    "news-briefing": "No findings; freshness filter and link validation solid.",
+    "papers-digest": "Style: evenly-spaced sampling logic needs intent comment.",
+    "release-radar": "Style: _parse_published() normalization fragile to `+0000` format; use regex or rstrip.",
+    "repo-review": "Style: CODE_EXT/DOC_EXT split good, but comment should explain what is deliberately excluded (JSON, lockfiles).",
+    "study-coach": "Risk: case-insensitive topic match uses substring instead of exact comparison; style: resolve_topic() docstring says 'force' but doesn't overwrite existing headers.",
+    "tech-news": "No findings; Industry feed added and link validation in place.",
+    "weather-report": "Style: is_severe() function promised in README but plumbing not visible in diff."
+   }
+  }
+ ],
+ "spotlights": {
+  "databricksrepo": {
+   "date": "2026-07-08",
+   "notes": "databricksrepo remains completely empty (README-only) for a second consecutive spotlight cycle; both prior fixes (real README, stub notebook) were ignored, now escalated. New findings shift focus to governance gaps: no license, no .gitignore, no CI/CD or Databricks Asset Bundle scaffolding, and a non-descriptive repo name. Recommended first fix: write a real purpose-driven README plus a databricks.yml bundle skeleton to convert this from a dead placeholder into an actual project shell."
+  }
+ }
+}

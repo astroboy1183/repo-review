@@ -5,7 +5,7 @@ One Telegram message every evening (~19:37 IST via GitHub Actions) reviewing
 my GitHub account:
 
   - every commit pushed to any of my repos in the last 24h, reviewed from
-    the actual diffs — real bugs first, then risky patterns, then idioms
+    the actual diffs — findings tagged [BUG]/[RISK]/[STYLE], bugs first
   - a rotating SPOTLIGHT: one repo per day gets a full read-through
     (dead code, naming, error handling, structure), so every repo gets a
     deep review every couple of weeks
@@ -13,13 +13,25 @@ my GitHub account:
     repos to keep, which to finish, which to archive or delete
   - one small suggestion for tomorrow
 
+The agent keeps MEMORY (state/findings.json, committed back to this repo
+by the workflow): yesterday's findings are fed into today's prompt so the
+review acknowledges fixes, escalates ignored problems, and never repeats
+a spotlight verbatim when a repo's turn comes around again.
+
+Two model calls with different tiers: the daily diff pass runs on a cheap
+model, the spotlight/portfolio deep read on a stronger one (REVIEW_MODEL_DAILY
+/ REVIEW_MODEL_DEEP override either).
+
 Always sends — a quiet coding day still gets the spotlight review.
 
 Same fleet pattern as the other agents: own repo, own schedule, fails alone.
 Needs REPOS_READ_TOKEN (read-only PAT) to list and read the account's repos.
 """
 
+import hashlib
+import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -47,6 +59,12 @@ CODE_EXT = (".py", ".sql", ".sh", ".js", ".ts")
 DOC_EXT = (".md", ".yml", ".yaml", ".toml")
 SOURCE_EXT = CODE_EXT + DOC_EXT
 
+# Review memory. The workflow commits this file back to the repo after each
+# run, so tomorrow's review knows what today's said.
+STATE_FILE = BASE_DIR / "state" / "findings.json"
+STATE_DAYS = 14  # how many days of daily findings to keep
+STATE_MARKER = "===STATE==="  # separates the message from its JSON memory tail
+
 
 def gh_get(path, accept="application/vnd.github+json", **params):
     """One GitHub API GET; raises on HTTP errors."""
@@ -71,6 +89,36 @@ def my_repos():
         "/user/repos", affiliation="owner", per_page=100, sort="pushed"
     ).json()
     return [r for r in repos if not r["fork"] and not r["archived"]]
+
+
+def trim_diff(diff, budget=MAX_DIFF_CHARS):
+    """Cut an over-budget diff at file boundaries, source code first.
+
+    A blind [:budget] cut spends the budget on whatever GitHub emitted first
+    — often lockfile or README churn — and can stop mid-hunk. Instead, split
+    into per-file sections, keep code files first and docs/config after,
+    until the budget runs out, and say what was dropped."""
+    if len(diff) <= budget:
+        return diff
+    sections = [s for s in re.split(r"(?=^diff --git )", diff, flags=re.M) if s.strip()]
+
+    def code_first(section):
+        head = section.splitlines()[0] if section.splitlines() else ""
+        return 0 if head.rsplit(" b/", 1)[-1].endswith(CODE_EXT) else 1
+
+    kept, dropped, used = [], 0, 0
+    for s in sorted(sections, key=code_first):
+        if used + len(s) <= budget:
+            kept.append(s)
+            used += len(s)
+        else:
+            dropped += 1
+    if not kept:  # a single file diff bigger than the whole budget
+        return diff[:budget] + "\n(… diff truncated for size)"
+    out = "".join(kept)
+    if dropped:
+        out += f"\n(… {dropped} file diffs omitted for size)"
+    return out
 
 
 def day_diff(repo, since):
@@ -104,7 +152,27 @@ def day_diff(repo, since):
         diff = gh_get(
             f"/repos/{full}/commits/{head}", accept="application/vnd.github.diff"
         ).text
-    return subjects, diff[:MAX_DIFF_CHARS], note
+    return subjects, trim_diff(diff), note
+
+
+def dedupe_changed(changed):
+    """Collapse identical diffs pushed to many repos (fleet-wide syncs).
+
+    Reviewing the same diff twelve times reads as twelve sets of findings;
+    one review labelled with every repo it applies to is honest and cheaper.
+    Grouping is by exact diff hash, so only true clones collapse."""
+    groups = {}
+    for entry in changed:
+        digest = hashlib.sha256(entry[2].encode()).hexdigest()
+        groups.setdefault(digest, []).append(entry)
+    out = []
+    for members in groups.values():
+        name, subjects, diff, note = members[0]
+        if len(members) > 1:
+            others = ", ".join(m[0] for m in members[1:])
+            name = f"{name} (same diff in {len(members) - 1} more: {others})"
+        out.append((name, subjects, diff, note))
+    return out
 
 
 def spotlight_source(repo):
@@ -148,20 +216,107 @@ def repo_inventory(repos):
     )
 
 
-def build_prompt(changed, spot_name, spot_src, inventory=None):
+# --- memory -------------------------------------------------------------
+
+
+def load_state():
+    """Review memory; an unreadable file costs the memory, never the run."""
+    try:
+        state = json.loads(STATE_FILE.read_text())
+    except (OSError, ValueError):
+        state = {}
+    state.setdefault("daily", [])
+    state.setdefault("spotlights", {})
+    return state
+
+
+def save_state(state):
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    STATE_FILE.write_text(json.dumps(state, indent=1, sort_keys=True) + "\n")
+
+
+def split_state(reply):
+    """(message text, memory dict) from a model reply.
+
+    The model appends a JSON tail after STATE_MARKER; a missing or
+    malformed tail costs the memory, never the message."""
+    if STATE_MARKER not in reply:
+        return reply.strip(), {}
+    text, _, tail = reply.partition(STATE_MARKER)
+    start, end = tail.find("{"), tail.rfind("}")
+    parsed = {}
+    if start != -1 and end > start:
+        try:
+            parsed = json.loads(tail[start : end + 1])
+        except ValueError:
+            parsed = {}
+    return text.strip(), parsed if isinstance(parsed, dict) else {}
+
+
+def recent_findings(state, names):
+    """{repo: ['date: summary', …]} — memory for the repos changed today."""
+    out = {}
+    for entry in state.get("daily", []):
+        for name, summary in entry.get("findings", {}).items():
+            if name in names:
+                out.setdefault(name, []).append(f"{entry.get('date')}: {summary}")
+    return out
+
+
+# --- prompts ------------------------------------------------------------
+
+
+def build_changes_prompt(changed, history):
     change_blocks = [
         f"=== {name}{note} — commits: {'; '.join(subjects)} ===\n{diff}"
         for name, subjects, diff, note in changed
-    ] or ["(no commits pushed in the last 24h)"]
-
+    ]
     return (
-        "You are reviewing my personal GitHub account. I am a data engineer; "
-        "these repos are study projects and a small fleet of Telegram agents. "
-        "Plain text only — no markdown headers or bold.\n\n"
+        "You are reviewing today's pushes to my personal GitHub account. "
+        "I am a data engineer; these repos are study projects and a small "
+        "fleet of Telegram agents. Plain text only — no markdown headers "
+        "or bold.\n\n"
         "=== INPUT 1: diffs pushed in the last 24h, per repo ===\n\n"
         + "\n\n".join(change_blocks)
-        + f"\n\n=== INPUT 2: source of today's spotlight repo, {spot_name} ===\n\n"
+        + "\n\n=== INPUT 2: your own recent findings for these repos ===\n\n"
+        + (json.dumps(history, indent=1) if history else "(none on record)")
+        + "\n\nProduce EXACTLY this output structure:\n\n"
+        "🔎 TODAY'S CHANGES\n"
+        "Per repo with commits: 2-4 review bullets drawn from the diff, "
+        "each tagged [BUG] (wrong behavior on real input), [RISK] "
+        "(fragile or unsafe pattern) or [STYLE] (idiom/clarity) — bugs "
+        "first. Every bullet names the file (and function when visible) "
+        "AND states the concrete fix in the same breath; a finding "
+        "without a fix is not worth sending. At most ONE [STYLE] bullet "
+        "per repo; a repo with nothing above style gets exactly "
+        "'no significant findings'. Honest but kind; praise only what "
+        "earned it.\n"
+        "Use your recent findings: when today's diff fixes something you "
+        "flagged, open that repo's bullets by acknowledging it; when a "
+        "flagged problem is still there and being built on, escalate it "
+        "in one line — never re-describe it verbatim. If a repo header "
+        "is marked '(newest N commits only)', carry that caveat into its "
+        "bullets so a heavy day is not read as fully reviewed.\n\n"
+        f"Then output the line {STATE_MARKER} and ONE JSON object mapping "
+        "each repo to a one-line summary of today's key findings for it. "
+        "Keys must be bare repo names (for a grouped header, the first "
+        "name). No text after the JSON."
+    )
+
+
+def build_deep_prompt(spot_name, spot_src, prior, inventory=None):
+    return (
+        "You are deep-reviewing one repo from my personal GitHub account "
+        "(I am a data engineer). Plain text only — no markdown headers or "
+        "bold.\n\n"
+        f"=== INPUT 1: source of today's spotlight repo, {spot_name} ===\n\n"
         + (spot_src or "(unavailable)")
+        + (
+            f"\n\n=== INPUT 2: your notes from this repo's previous "
+            f"spotlight ({prior['date']}) ===\n\n{prior['notes']}"
+            if prior
+            else ""
+        )
         + (
             "\n\n=== INPUT 3: full repo inventory (weekly portfolio check) ===\n\n"
             + inventory
@@ -169,19 +324,20 @@ def build_prompt(changed, spot_name, spot_src, inventory=None):
             else ""
         )
         + "\n\nProduce EXACTLY this output structure:\n\n"
-        "🔎 TODAY'S CHANGES\n"
-        "Per repo with commits: 2-4 specific review bullets drawn from the "
-        "diff — real bugs first, then risky patterns, then better idioms; "
-        "name the file/function each time. Honest but kind; praise only "
-        "what earned it. If a repo header is marked '(newest N commits "
-        "only)', add that exact caveat to that repo's bullets so a heavy "
-        "day is not read as fully reviewed. If there were no commits: "
-        "exactly one line saying so.\n\n"
         f"💡 SPOTLIGHT: {spot_name}\n"
-        "4-6 bullets from the full source: overall verdict in one line, "
-        "then the highest-value concrete improvements (dead code, naming, "
-        "error handling, structure, missing tests) with file references. "
-        "End the section with the single change you would make first.\n\n"
+        + (
+            "Start with follow-through on your previous notes: one line "
+            "per prior item — fixed, partial, or ignored (escalate the "
+            "ignored ones). Then only NEW findings; never repeat an old "
+            "one verbatim.\n"
+            if prior
+            else ""
+        )
+        + "4-6 bullets from the full source: overall verdict in one line, "
+        "then the highest-value concrete improvements tagged "
+        "[BUG]/[RISK]/[STYLE] (dead code, naming, error handling, "
+        "structure, missing tests) with file references. End the section "
+        "with the single change you would make first.\n\n"
         + (
             "🗂 PORTFOLIO\n"
             "From the inventory, judged by name, description, size and last "
@@ -196,15 +352,26 @@ def build_prompt(changed, spot_name, spot_src, inventory=None):
             if inventory
             else ""
         )
-        + "Close with ONE small, concrete suggestion for tomorrow."
+        + "Close with ONE small, concrete suggestion for tomorrow.\n\n"
+        f"Then output the line {STATE_MARKER} and ONE JSON object: "
+        '{"spotlight": "<3-4 lines: your key spotlight findings and, if '
+        'there were prior notes, the follow-through status>"}. '
+        "No text after the JSON."
     )
+
+
+# --- entry point ---------------------------------------------------------
 
 
 def main():
     load_dotenv(BASE_DIR / ".env")
     now = datetime.now(timezone.utc)
     since = now - timedelta(hours=LOOKBACK_HOURS)
+    # env read after load_dotenv so .env values work too
+    daily_model = os.environ.get("REVIEW_MODEL_DAILY") or "claude-haiku-4-5"
+    deep_model = os.environ.get("REVIEW_MODEL_DEEP") or "claude-sonnet-5"
 
+    state = load_state()
     repos = my_repos()
     changed, failed = [], []
     for repo in repos:
@@ -215,13 +382,20 @@ def main():
             continue
         if got:
             changed.append((repo["name"], *got))
+    changed = dedupe_changed(changed)
 
-    # Rotate the deep dive by day of year over a FIXED (name-sorted) order,
-    # so every repo genuinely comes up every len(repos) days regardless of
-    # push activity — my_repos() is sorted by push date, which would make
-    # the pick jump around. No state to store either way.
+    # Spotlight: manual override (workflow input) wins; otherwise rotate by
+    # day of year over a FIXED (name-sorted) order, so every repo genuinely
+    # comes up every len(repos) days regardless of push activity.
     rotation = sorted(repos, key=lambda r: r["name"])
-    spot = rotation[now.timetuple().tm_yday % len(rotation)] if rotation else None
+    spot = None
+    override = os.environ.get("REVIEW_SPOTLIGHT", "").strip()
+    if override:
+        spot = next((r for r in rotation if r["name"] == override), None)
+        if spot is None:
+            failed.append(f"spotlight override '{override}' not found; rotating")
+    if spot is None and rotation:
+        spot = rotation[now.timetuple().tm_yday % len(rotation)]
     spot_src = ""
     if spot:
         try:
@@ -235,15 +409,38 @@ def main():
         datetime.now(IST).weekday() == CURATION_WEEKDAY
         or bool(os.environ.get("REVIEW_CURATE"))
     )
-    body = ask_llm(
-        build_prompt(
-            changed, spot_name, spot_src, repo_inventory(repos) if curate else None
+
+    # Call 1 — the day's diffs, cheap model, skipped entirely on quiet days.
+    if changed:
+        base_names = [entry[0].split(" (same diff", 1)[0] for entry in changed]
+        history = recent_findings(state, base_names)
+        # The token budget must scale with the repo count: a fixed cap on a
+        # busy day truncates the reply mid-review and cuts off the memory
+        # tail (which comes last) entirely.
+        reply = ask_llm(
+            build_changes_prompt(changed, history),
+            max_tokens=min(4000, 600 + 200 * len(changed)),
+            model=daily_model,
+        )
+        changes_text, changes_mem = split_state(reply)
+    else:
+        changes_text = "🔎 TODAY'S CHANGES\nNo commits pushed in the last 24h."
+        changes_mem = {}
+
+    # Call 2 — the deep read (+ portfolio on curate days), stronger model.
+    prior = state["spotlights"].get(spot_name) if spot else None
+    reply = ask_llm(
+        build_deep_prompt(
+            spot_name, spot_src, prior, repo_inventory(repos) if curate else None
         ),
-        max_tokens=2500 if curate else 1800,
+        max_tokens=2200 if curate else 1500,
+        model=deep_model,
     )
+    deep_text, deep_mem = split_state(reply)
+
+    body = changes_text + "\n\n" + deep_text
     if failed:
         body += "\n\n⚠️ Could not check: " + ", ".join(failed)
-
     header = (
         f"🔍 Repo review — {datetime.now(IST):%a %d %b %Y}\n"
         f"({len(changed)} repos with commits today, spotlight: {spot_name}"
@@ -251,6 +448,22 @@ def main():
         + ")\n\n"
     )
     send_telegram(header + body)
+
+    # Persist memory last — the message already went out, so a state failure
+    # only costs tomorrow's context, never today's review.
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    if changes_mem:
+        state["daily"].append({"date": today, "findings": changes_mem})
+        state["daily"] = state["daily"][-STATE_DAYS:]
+    if spot and deep_mem.get("spotlight"):
+        state["spotlights"][spot_name] = {
+            "date": today,
+            "notes": str(deep_mem["spotlight"])[:1500],
+        }
+    try:
+        save_state(state)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
