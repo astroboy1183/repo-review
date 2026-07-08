@@ -12,6 +12,10 @@ on:
     - cron: '7 15 * * *'
   workflow_dispatch:
     inputs:
+      source:
+        description: 'Set to "scheduler" by fleet-scheduler; leave empty for manual runs'
+        default: ''
+        required: false
       curate:
         description: 'Include portfolio keep/finish/delete advice (1 = yes)'
         default: ''
@@ -34,17 +38,19 @@ jobs:
         id: guard
         env:
           GH_TOKEN: ${{ github.token }}
+          DISPATCH_SOURCE: ${{ inputs.source || '' }}
         run: |
-          # Manual runs always proceed; only scheduled runs dedupe against
-          # each other. Fails open — a broken check must never cost a review.
-          if [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
+          # Truly-manual runs always proceed; cron runs and scheduler
+          # dispatches (source=scheduler) dedupe against each other. Fails open — a broken check must never cost a review.
+          if [ "$GITHUB_EVENT_NAME" != "schedule" ] && [ "$DISPATCH_SOURCE" != "scheduler" ]; then
             exit 0
           fi
           today=$(date -u +%Y-%m-%d)
           count=$(RUN_ID="$GITHUB_RUN_ID" gh api -X GET \
             "repos/$GITHUB_REPOSITORY/actions/workflows/repo-review.yml/runs" \
-            -f event=schedule -f created=">=$today" \
+            -f created=">=$today" \
             --jq '[.workflow_runs[]
+                   | select(.event == "schedule" or .event == "workflow_dispatch")
                    | select(.id != (env.RUN_ID|tonumber))
                    | select(.status == "queued" or .status == "in_progress"
                             or .conclusion == "success")] | length') || count=0
