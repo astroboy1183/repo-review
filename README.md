@@ -28,17 +28,28 @@ Always sends — a quiet coding day still gets the spotlight.
   sorted by push date), then drops forks and archived repos: only code
   that is actually mine gets reviewed.
 - **`day_diff(repo, since)`** — commits on the default branch since the
-  24h cutoff (newest first, capped at 20). If any exist, it fetches ONE
-  combined diff via the compare API — parent-of-oldest…head — rather
-  than a diff per commit. A repo born inside the window has no parent,
-  so it falls back to diffing the head commit itself. Diffs are capped
-  at `MAX_DIFF_CHARS = 8000` per repo.
+  24h cutoff (newest first, capped at `MAX_COMMITS_PER_REPO = 20`). If
+  any exist, it fetches ONE combined diff via the compare API —
+  parent-of-oldest…head — rather than a diff per commit. A repo born
+  inside the window has no parent, so it falls back to diffing the head
+  commit itself. Diffs are capped at `MAX_DIFF_CHARS = 8000` per repo.
+  When a day overflows 20 commits the review only covers the newest 20,
+  so the repo is tagged `(newest 20 commits only)` and the model is told
+  to echo that caveat — a heavy day never looks fully reviewed when it
+  isn't.
 - **`spotlight_source(repo)`** — full read of the day's spotlight repo:
   the git tree API (recursive) lists every file; source-looking ones
   (by extension) are fetched raw until the budget runs out
-  (12 files / 30k chars). One unreadable blob is skipped, not fatal.
-- **Rotation** — `day_of_year % len(repos)` picks the spotlight, so
-  every repo comes up every `len(repos)` days with no state to store.
+  (12 files / 30k chars). Real code (`CODE_EXT`: `.py/.sql/.sh/.js/.ts`)
+  is fetched before docs and config (`DOC_EXT`: `.md/.yml/.yaml/.toml`),
+  so the budget is spent reviewing code rather than READMEs and YAML;
+  `.json`/`.lock` files never qualify. One unreadable blob is skipped,
+  not fatal.
+- **Rotation** — the repo list is sorted by name into a fixed order, then
+  `day_of_year % len(repos)` picks the spotlight, so every repo genuinely
+  comes up once every `len(repos)` days. (`my_repos()` sorts by push date
+  for the diff scan; the spotlight deliberately ignores that so the pick
+  doesn't jump around with activity.) No state to store.
 - **`repo_inventory(repos)`** — one metadata line per repo (language,
   description, created, last push, size, open issues) — the input for
   portfolio advice; costs zero extra API calls.

@@ -40,7 +40,12 @@ MAX_DIFF_CHARS = 8000  # per repo; keeps the prompt size sane
 MAX_SPOTLIGHT_FILES = 12
 MAX_SPOTLIGHT_CHARS = 30000
 CURATION_WEEKDAY = 6  # Sunday — keep/finish/delete advice changes slowly
-SOURCE_EXT = (".py", ".sql", ".sh", ".js", ".ts", ".yml", ".yaml", ".toml", ".md")
+# The deep-read budget (12 files / 30k chars) should be spent on real code,
+# not READMEs and config. CODE_EXT is fetched first; DOC_EXT (docs, config,
+# lockfile-ish text) only fills whatever budget is left over.
+CODE_EXT = (".py", ".sql", ".sh", ".js", ".ts")
+DOC_EXT = (".md", ".yml", ".yaml", ".toml")
+SOURCE_EXT = CODE_EXT + DOC_EXT
 
 
 def gh_get(path, accept="application/vnd.github+json", **params):
@@ -69,8 +74,10 @@ def my_repos():
 
 
 def day_diff(repo, since):
-    """(commit subjects, unified diff) for one repo's last-24h changes,
-    or None if nothing was pushed."""
+    """(commit subjects, unified diff, cap note) for one repo's last-24h
+    changes, or None if nothing was pushed. The cap note is non-empty only
+    when the day overflowed MAX_COMMITS_PER_REPO, so a heavy day is not
+    reported as if every commit was reviewed."""
     full = repo["full_name"]
     commits = gh_get(
         f"/repos/{full}/commits",
@@ -80,6 +87,11 @@ def day_diff(repo, since):
     ).json()
     if not commits:
         return None
+    note = (
+        f" (newest {MAX_COMMITS_PER_REPO} commits only)"
+        if len(commits) >= MAX_COMMITS_PER_REPO
+        else ""
+    )
     subjects = [c["commit"]["message"].splitlines()[0] for c in commits]
     head = commits[0]["sha"]
     parents = commits[-1]["parents"]  # newest first, so [-1] is the oldest
@@ -92,7 +104,7 @@ def day_diff(repo, since):
         diff = gh_get(
             f"/repos/{full}/commits/{head}", accept="application/vnd.github.diff"
         ).text
-    return subjects, diff[:MAX_DIFF_CHARS]
+    return subjects, diff[:MAX_DIFF_CHARS], note
 
 
 def spotlight_source(repo):
@@ -100,10 +112,16 @@ def spotlight_source(repo):
     full = repo["full_name"]
     branch = repo["default_branch"]
     tree = gh_get(f"/repos/{full}/git/trees/{branch}", recursive=1).json()
+    blobs = [
+        node
+        for node in tree.get("tree", [])
+        if node["type"] == "blob" and node["path"].endswith(SOURCE_EXT)
+    ]
+    # Real code before docs/config, so the budget is spent reviewing code
+    # rather than READMEs and YAML. Stable sort keeps tree order within a tier.
+    blobs.sort(key=lambda n: 0 if n["path"].endswith(CODE_EXT) else 1)
     picked, budget = [], MAX_SPOTLIGHT_CHARS
-    for node in tree.get("tree", []):
-        if node["type"] != "blob" or not node["path"].endswith(SOURCE_EXT):
-            continue
+    for node in blobs:
         if len(picked) >= MAX_SPOTLIGHT_FILES or budget <= 0:
             break
         try:
@@ -132,8 +150,8 @@ def repo_inventory(repos):
 
 def build_prompt(changed, spot_name, spot_src, inventory=None):
     change_blocks = [
-        f"=== {name} — commits: {'; '.join(subjects)} ===\n{diff}"
-        for name, subjects, diff in changed
+        f"=== {name}{note} — commits: {'; '.join(subjects)} ===\n{diff}"
+        for name, subjects, diff, note in changed
     ] or ["(no commits pushed in the last 24h)"]
 
     return (
@@ -155,8 +173,10 @@ def build_prompt(changed, spot_name, spot_src, inventory=None):
         "Per repo with commits: 2-4 specific review bullets drawn from the "
         "diff — real bugs first, then risky patterns, then better idioms; "
         "name the file/function each time. Honest but kind; praise only "
-        "what earned it. If there were no commits: exactly one line "
-        "saying so.\n\n"
+        "what earned it. If a repo header is marked '(newest N commits "
+        "only)', add that exact caveat to that repo's bullets so a heavy "
+        "day is not read as fully reviewed. If there were no commits: "
+        "exactly one line saying so.\n\n"
         f"💡 SPOTLIGHT: {spot_name}\n"
         "4-6 bullets from the full source: overall verdict in one line, "
         "then the highest-value concrete improvements (dead code, naming, "
@@ -196,9 +216,12 @@ def main():
         if got:
             changed.append((repo["name"], *got))
 
-    # Rotate the deep dive by day of year so every repo comes up every
-    # len(repos) days without any state to store.
-    spot = repos[now.timetuple().tm_yday % len(repos)] if repos else None
+    # Rotate the deep dive by day of year over a FIXED (name-sorted) order,
+    # so every repo genuinely comes up every len(repos) days regardless of
+    # push activity — my_repos() is sorted by push date, which would make
+    # the pick jump around. No state to store either way.
+    rotation = sorted(repos, key=lambda r: r["name"])
+    spot = rotation[now.timetuple().tm_yday % len(rotation)] if rotation else None
     spot_src = ""
     if spot:
         try:
