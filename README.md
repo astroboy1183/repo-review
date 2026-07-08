@@ -109,6 +109,8 @@ Always sends — a quiet coding day still gets the spotlight.
 - Two crons + dedupe guard: backup at 20:37 IST delivers only if the
   19:37 primary was dropped or failed.
 
+- Tests run in CI on every push (`.github/workflows/tests.yml`).
+
 ## Ops
 
 - Schedule: `.github/workflows/repo-review.yml` (`7 14 * * *` UTC = 19:37 IST; backup 20:37)
