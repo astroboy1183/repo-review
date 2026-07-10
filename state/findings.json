@@ -42,12 +42,25 @@
     "tech-news": "Industry feed added and link validation in place.",
     "weather-report": "is_severe() function tested but definition not shown in diff; confirm presence."
    }
+  },
+  {
+   "date": "2026-07-10",
+   "findings": {
+    "eng-blogs": "ask_llm guards empty responses (good); feed error categorization still conflates timeout/network/HTTP",
+    "mail-digest": "ask_llm guards empty responses; vip_block missing .get() on 'vip' key, _LINK_RE undocumented",
+    "study-coach": "state updated; resolve_topic substring matching + docstring mismatch still present",
+    "weather-report": "ask_llm guards empty responses across 8 repos; consider shared module to avoid copy-paste"
+   }
   }
  ],
  "spotlights": {
   "databricksrepo": {
    "date": "2026-07-08",
    "notes": "databricksrepo remains completely empty (README-only) for a second consecutive spotlight cycle; both prior fixes (real README, stub notebook) were ignored, now escalated. New findings shift focus to governance gaps: no license, no .gitignore, no CI/CD or Databricks Asset Bundle scaffolding, and a non-descriptive repo name. Recommended first fix: write a real purpose-driven README plus a databricks.yml bundle skeleton to convert this from a dead placeholder into an actual project shell."
+  },
+  "markets-brief": {
+   "date": "2026-07-10",
+   "notes": "markets-brief is a clean, deterministic Telegram agent (Yahoo Finance quotes, no LLM) with solid offline unit tests and a well-reasoned dual-cron dedupe guard in CI. Main findings: quote()'s dual-host fallback swallows which host/symbol failed (diagnosability gap), send_telegram's chunk-retry has an undocumented partial-send edge case, and main()'s per-symbol failure isolation lacks a dedicated test. No prior notes to follow up on \u2014 this is the first review of this repo."
   }
  }
 }
