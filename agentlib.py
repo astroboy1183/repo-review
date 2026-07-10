@@ -18,16 +18,31 @@ def ask_llm(prompt, model="claude-haiku-4-5", max_tokens=2000):
     """Single-turn model call; returns the text response.
 
     No retry loop here on purpose: the Anthropic SDK already retries
-    connection errors, 429s and 5xx internally (max_retries=2 default)."""
+    connection errors, 429s and 5xx internally (max_retries=2 default).
+
+    Thinking is disabled: every caller is a one-shot summarizer/classifier
+    /writer that wants the whole token budget spent on the answer, not on a
+    chain of thought. This also sidesteps a Sonnet-5-class failure — those
+    models default to adaptive thinking when `thinking` is omitted, and
+    max_tokens caps thinking+answer together, so a tight budget can come
+    back as thinking-only with no text block. We still guard for an empty
+    response and fail loudly with the stop_reason rather than a bare
+    StopIteration, so any no-text reply (e.g. a refusal) is diagnosable."""
     from anthropic import Anthropic  # deferred: send-only agents skip the dep
 
     client = Anthropic()  # ANTHROPIC_API_KEY from environment
     response = client.messages.create(
         model=model,
         max_tokens=max_tokens,
+        thinking={"type": "disabled"},
         messages=[{"role": "user", "content": prompt}],
     )
-    return next(b.text for b in response.content if b.type == "text")
+    text = "".join(b.text for b in response.content if b.type == "text")
+    if not text:
+        raise RuntimeError(
+            f"model returned no text (stop_reason={response.stop_reason})"
+        )
+    return text
 
 
 def send_telegram(text):
