@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Repo review agent.
 
-One Telegram message every evening (~19:37 IST via GitHub Actions) reviewing
+One Telegram message every morning (6:00 IST via GitHub Actions) reviewing
 my GitHub account:
 
   - every commit pushed to any of my repos in the last 24h, reviewed from

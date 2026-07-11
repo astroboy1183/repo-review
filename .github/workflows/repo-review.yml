@@ -2,14 +2,14 @@ name: Repo review
 
 on:
   schedule:
-    # Primary: 14:07 UTC = 19:37 IST — evening slot, after the eng-blogs
+    # Primary: 00:30 UTC = 06:00 IST — morning slot, with the rest of the fleet
     # digest. Odd minute avoids GitHub's top-of-hour cron congestion.
-    - cron: '7 14 * * *'
+    - cron: '30 0 * * *'
     # Backup: 15:07 UTC = 20:37 IST. GitHub delays or drops schedule events
     # under load (fleet lesson from 2026-07-04). The guard step skips this
     # run when the primary already handled today, so it only delivers when
     # the primary was dropped — or failed, making it a retry too.
-    - cron: '7 15 * * *'
+    - cron: '30 1 * * *'
   workflow_dispatch:
     inputs:
       source:
