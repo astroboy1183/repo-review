@@ -3,16 +3,27 @@
 Daily code review of my own GitHub repos → Telegram, 6:00 IST via
 GitHub Actions. One agent, one task, one bot.
 
-Three parts:
+The sections:
 
 - **Today's changes** — every commit pushed to any repo in the account
   in the last 24h, reviewed from the actual diffs. Findings are tagged
   `[BUG]` / `[RISK]` / `[STYLE]`, bugs first, every one with a file
-  reference and its concrete fix.
+  reference and its concrete fix — plus a one-line nudge when commit
+  subjects are uninformative ("fix", "update", "wip").
 - **Spotlight** — one repo per day (rotating) gets a full read-through:
-  dead code, naming, error handling, structure.
+  dead code, naming, error handling, structure. Under it, two
+  deterministic lines: **🏅 Hygiene** (README / description / license /
+  tests / CI / .gitignore / topics — a /7 score naming what's missing,
+  the portfolio-polish signal) and **📌 Debt markers** (TODO/FIXME/HACK
+  counts per file from the fetched source).
+- **🔴 CI HEALTH** — any repo whose *latest* Actions run failed, with a
+  link. Deterministic; a silently red repo must not survive a day.
 - **Portfolio** (Sundays) — keep/finish/archive/delete advice for the
-  whole account from repo metadata.
+  whole account from repo metadata — plus **🗓 WEEK IN CODE**: commits
+  and busiest day from the activity memory (recorded free by the daily
+  runs), open PRs with ages, and repos carrying extra branches.
+- **📈 RISING REPOS** — new GitHub repos crossing ★300 this week, each
+  shown exactly once (state-remembered).
 
 The agent has **memory**: it stores its findings after every run
 (`state/findings.json`, committed back to this repo) and reads them the
@@ -67,6 +78,16 @@ Always sends — a quiet coding day still gets the spotlight.
   for the diff scan; the spotlight deliberately ignores that so the pick
   doesn't jump around with activity.) A `workflow_dispatch` run can force
   the target with the `spotlight` input (`REVIEW_SPOTLIGHT` env).
+- **`repo_tree_paths(repo)` / `hygiene_score(repo, paths)` /
+  `debt_markers(spot_src)`** — one tree call now feeds both the
+  spotlight read and the hygiene checklist; debt markers are scanned
+  from the already-fetched source. All deterministic.
+- **`ci_health(repos)`** — latest Actions run per repo (one API call
+  each, failures skipped per-repo); only bad conclusions
+  (failure/timed_out/startup_failure) surface.
+- **`week_in_code(state, repos)`** — Sundays: rolls up
+  `state["activity"]` (each daily run records {repo: commit count} —
+  zero extra API calls) and sweeps open PRs + branch counts.
 - **`repo_inventory(repos)`** — one metadata line per repo (language,
   description, created, last push, size, open issues) — the input for
   portfolio advice; costs zero extra API calls.

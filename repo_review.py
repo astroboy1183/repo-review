@@ -5,12 +5,18 @@ One Telegram message every morning (6:00 IST via GitHub Actions) reviewing
 my GitHub account:
 
   - every commit pushed to any of my repos in the last 24h, reviewed from
-    the actual diffs — findings tagged [BUG]/[RISK]/[STYLE], bugs first
+    the actual diffs — findings tagged [BUG]/[RISK]/[STYLE], bugs first,
+    with a nudge when commit subjects are uninformative
   - a rotating SPOTLIGHT: one repo per day gets a full read-through
     (dead code, naming, error handling, structure), so every repo gets a
-    deep review every couple of weeks
+    deep review every couple of weeks — plus a deterministic 🏅 hygiene
+    score (README/license/tests/CI/…) and 📌 debt markers (TODO/FIXME)
+  - 🔴 CI HEALTH: any repo whose latest Actions run failed is called out
+    with a link — a silently red repo must not survive a day
   - on Sundays (or with REVIEW_CURATE=1): a PORTFOLIO section — which
-    repos to keep, which to finish, which to archive or delete
+    repos to keep, which to finish, which to archive or delete — and a
+    🗓 WEEK IN CODE rollup (commits, busiest day, open PRs, extra
+    branches) from the activity memory
   - 📈 RISING REPOS: new GitHub repos that crossed a star threshold this
     week (search API, deterministic) — what the ecosystem is excited
     about, each repo shown exactly once (state-remembered)
@@ -67,6 +73,12 @@ RISING_WINDOW_DAYS = 7
 RISING_MIN_STARS = 300
 RISING_CAP = 3
 RISING_KEEP_DAYS = 60  # prune remembered repos after this
+
+# Debt markers surfaced from the spotlight source, and the activity
+# memory behind Sunday's 🗓 WEEK IN CODE.
+DEBT_RE = re.compile(r"\b(TODO|FIXME|HACK|XXX)\b")
+DEBT_CAP = 5           # markers listed; the rest just counted
+ACTIVITY_DAYS = 21     # daily commit counts kept this long
 
 # Review memory. The workflow commits this file back to the repo after each
 # run, so tomorrow's review knows what today's said.
@@ -184,34 +196,155 @@ def dedupe_changed(changed):
     return out
 
 
-def spotlight_source(repo):
+def repo_tree_paths(repo):
+    """Every blob path in the repo — one tree call, shared by the
+    spotlight read and the hygiene score."""
+    tree = gh_get(
+        f"/repos/{repo['full_name']}/git/trees/{repo['default_branch']}",
+        recursive=1,
+    ).json()
+    return [n["path"] for n in tree.get("tree", []) if n["type"] == "blob"]
+
+
+def spotlight_source(repo, paths):
     """Up to ~30k chars of a repo's source files for the deep read."""
     full = repo["full_name"]
     branch = repo["default_branch"]
-    tree = gh_get(f"/repos/{full}/git/trees/{branch}", recursive=1).json()
-    blobs = [
-        node
-        for node in tree.get("tree", [])
-        if node["type"] == "blob" and node["path"].endswith(SOURCE_EXT)
-    ]
+    blobs = [p for p in paths if p.endswith(SOURCE_EXT)]
     # Real code before docs/config, so the budget is spent reviewing code
     # rather than READMEs and YAML. Stable sort keeps tree order within a tier.
-    blobs.sort(key=lambda n: 0 if n["path"].endswith(CODE_EXT) else 1)
+    blobs.sort(key=lambda p: 0 if p.endswith(CODE_EXT) else 1)
     picked, budget = [], MAX_SPOTLIGHT_CHARS
-    for node in blobs:
+    for path in blobs:
         if len(picked) >= MAX_SPOTLIGHT_FILES or budget <= 0:
             break
         try:
             text = gh_get(
-                f"/repos/{full}/contents/{quote(node['path'])}",
+                f"/repos/{full}/contents/{quote(path)}",
                 accept="application/vnd.github.raw",
                 ref=branch,
             ).text[:budget]
         except requests.RequestException:
             continue  # one unreadable blob must not sink the spotlight
-        picked.append(f"--- {node['path']} ---\n{text}")
+        picked.append(f"--- {path} ---\n{text}")
         budget -= len(text)
     return "\n\n".join(picked)
+
+
+def hygiene_score(repo, paths):
+    """🏅 Deterministic repo-hygiene checklist — the portfolio-polish
+    signal: does this repo present itself well to a visitor?"""
+    lower = [p.lower() for p in paths]
+    checks = {
+        "README": any(p.startswith("readme") for p in lower),
+        "description": bool((repo.get("description") or "").strip()),
+        "license": any(p.startswith(("license", "licence")) for p in lower),
+        "tests": any(
+            p.rsplit("/", 1)[-1].startswith("test_") or "/tests/" in f"/{p}"
+            for p in lower
+        ),
+        "CI workflow": any(
+            p.startswith(".github/workflows/") and p.endswith((".yml", ".yaml"))
+            for p in lower
+        ),
+        ".gitignore": ".gitignore" in lower,
+        "topics": bool(repo.get("topics")),
+    }
+    missing = [name for name, ok in checks.items() if not ok]
+    score = len(checks) - len(missing)
+    line = f"🏅 Hygiene: {score}/{len(checks)}"
+    if missing:
+        line += " — missing: " + ", ".join(missing)
+    return line
+
+
+def debt_markers(spot_src):
+    """📌 TODO/FIXME/HACK/XXX markers in the spotlight source, counted per
+    file (the source carries '--- path ---' section headers)."""
+    counts, current = {}, "?"
+    for line in spot_src.splitlines():
+        if line.startswith("--- ") and line.endswith(" ---"):
+            current = line[4:-4]
+        elif DEBT_RE.search(line):
+            counts[current] = counts.get(current, 0) + 1
+    if not counts:
+        return ""
+    total = sum(counts.values())
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:DEBT_CAP]
+    detail = ", ".join(f"{path}×{n}" if n > 1 else path for path, n in top)
+    more = f" +{len(counts) - len(top)} more files" if len(counts) > DEBT_CAP else ""
+    return f"📌 Debt markers: {total} TODO/FIXME ({detail}{more})"
+
+
+def ci_health(repos):
+    """🔴 Repos whose LATEST Actions run concluded badly — with links.
+
+    Deterministic, one API call per repo; a repo with no runs (or an API
+    hiccup) is skipped, never fatal."""
+    lines = []
+    for repo in repos:
+        try:
+            runs = gh_get(
+                f"/repos/{repo['full_name']}/actions/runs", per_page=1
+            ).json().get("workflow_runs", [])
+        except Exception:
+            continue
+        if not runs:
+            continue
+        run = runs[0]
+        if run.get("conclusion") in ("failure", "timed_out", "startup_failure"):
+            lines.append(
+                f"• {repo['name']}: {run.get('name', 'workflow')} "
+                f"{run['conclusion']} — {run.get('html_url', '')}"
+            )
+    if not lines:
+        return ""
+    return "🔴 CI HEALTH — latest run failing:\n" + "\n".join(lines)
+
+
+def week_in_code(state, repos):
+    """🗓 Sunday rollup from the activity memory + a PR/branch sweep.
+
+    Commit counts come from what the daily runs already recorded (zero
+    extra API calls); open PRs and extra branches are one call per repo,
+    Sundays only."""
+    week = sorted(state.get("activity", {}).items())[-7:]
+    total = sum(sum(day.values()) for _, day in week)
+    lines = []
+    if total:
+        touched = {name for _, day in week for name in day}
+        busiest_date, busiest = max(
+            week, key=lambda kv: sum(kv[1].values())
+        )
+        lines.append(
+            f"{total} commits across {len(touched)} repos this week · "
+            f"busiest {datetime.strptime(busiest_date, '%Y-%m-%d'):%a} "
+            f"({sum(busiest.values())})"
+        )
+    prs, branchy = [], []
+    for repo in repos:
+        full = repo["full_name"]
+        try:
+            for pr in gh_get(f"/repos/{full}/pulls", state="open").json():
+                age = (
+                    datetime.now(timezone.utc)
+                    - datetime.strptime(
+                        pr["created_at"], "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=timezone.utc)
+                ).days
+                prs.append(f"{repo['name']}#{pr['number']} ({age}d): {pr['title'][:60]}")
+            branches = gh_get(f"/repos/{full}/branches", per_page=100).json()
+            if len(branches) > 1:
+                branchy.append(f"{repo['name']} ({len(branches) - 1} extra)")
+        except Exception:
+            continue  # a sweep miss must not sink the review
+    if prs:
+        lines.append("open PRs: " + "; ".join(prs))
+    if branchy:
+        lines.append("repos with extra branches: " + ", ".join(branchy))
+    if not lines:
+        return ""
+    return "🗓 WEEK IN CODE\n" + "\n".join(f"• {l}" for l in lines)
 
 
 def rising_repos(shown):
@@ -276,6 +409,14 @@ def load_state():
         k: v
         for k, v in state.get("rising", {}).items()
         if isinstance(v, str) and v >= cutoff
+    }
+    act_cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=ACTIVITY_DAYS)
+    ).strftime("%Y-%m-%d")
+    state["activity"] = {
+        d: counts
+        for d, counts in state.get("activity", {}).items()
+        if isinstance(d, str) and d >= act_cutoff and isinstance(counts, dict)
     }
     return state
 
@@ -346,7 +487,11 @@ def build_changes_prompt(changed, history):
         "flagged problem is still there and being built on, escalate it "
         "in one line — never re-describe it verbatim. If a repo header "
         "is marked '(newest N commits only)', carry that caveat into its "
-        "bullets so a heavy day is not read as fully reviewed.\n\n"
+        "bullets so a heavy day is not read as fully reviewed.\n"
+        "Commit subjects are part of the review: when a repo's subjects "
+        "are uninformative ('fix', 'update', 'wip', 'changes'), end that "
+        "repo's bullets with ONE line suggesting what the subject should "
+        "have said. Good subjects earn no comment.\n\n"
         f"Then output the line {STATE_MARKER} and ONE JSON object mapping "
         "each repo to a one-line summary of today's key findings for it. "
         "Keys must be bare repo names (for a grouped header, the first "
@@ -446,13 +591,19 @@ def main():
             failed.append(f"spotlight override '{override}' not found; rotating")
     if spot is None and rotation:
         spot = rotation[now.timetuple().tm_yday % len(rotation)]
-    spot_src = ""
+    spot_src, spot_extras = "", []
     if spot:
         try:
-            spot_src = spotlight_source(spot)
+            paths = repo_tree_paths(spot)
+            spot_src = spotlight_source(spot, paths)
+            spot_extras.append(hygiene_score(spot, paths))
+            debt = debt_markers(spot_src)
+            if debt:
+                spot_extras.append(debt)
         except Exception as exc:
             failed.append(f"spotlight {spot['name']} ({type(exc).__name__})")
             spot = None
+            spot_extras = []
     spot_name = spot["name"] if spot else "(unavailable)"
 
     curate = (
@@ -489,6 +640,26 @@ def main():
     deep_text, deep_mem = split_state(reply)
 
     body = changes_text + "\n\n" + deep_text
+    # The deterministic spotlight extras ride under the spotlight section.
+    if spot_extras:
+        body += "\n" + "\n".join(spot_extras)
+
+    # A silently red repo must not survive a day.
+    try:
+        red = ci_health(repos)
+    except Exception:
+        red = ""  # never sink the review
+    if red:
+        body += "\n\n" + red
+
+    # Sunday: the week's shape, from the activity memory + a PR sweep.
+    if curate:
+        try:
+            week = week_in_code(state, repos)
+        except Exception:
+            week = ""
+        if week:
+            body += "\n\n" + week
 
     # Deterministic garnish: what the ecosystem is starring this week.
     try:
@@ -511,6 +682,13 @@ def main():
     # Persist memory last — the message already went out, so a state failure
     # only costs tomorrow's context, never today's review.
     today = datetime.now(IST).strftime("%Y-%m-%d")
+    # activity: commit counts per repo — the raw material for WEEK IN CODE.
+    # A grouped fleet-sync entry counts once under its first repo name;
+    # that undercounts clones, which is the right bias for "how much did I
+    # actually write this week".
+    state.setdefault("activity", {})[today] = {
+        entry[0].split(" (same diff", 1)[0]: len(entry[1]) for entry in changed
+    }
     if changes_mem:
         state["daily"].append({"date": today, "findings": changes_mem})
         state["daily"] = state["daily"][-STATE_DAYS:]

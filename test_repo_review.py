@@ -73,7 +73,12 @@ class RotationTest(unittest.TestCase):
             "load_dotenv": lambda *a, **k: None,
             "my_repos": lambda: repos,
             "day_diff": lambda r, since: None,        # quiet day everywhere
-            "spotlight_source": lambda r: f"SRC:{r['name']}",
+            "repo_tree_paths": lambda r: [],
+            "spotlight_source": lambda r, paths: f"SRC:{r['name']}",
+            "hygiene_score": lambda r, paths: "🏅 Hygiene: 7/7",
+            "ci_health": lambda repos: "",
+            "week_in_code": lambda state, repos: "",
+            "rising_repos": lambda shown: ("", {}),
             "repo_inventory": lambda rs: "INV",
             "ask_llm": lambda prompt, max_tokens=0, model="": "BODY",
             "send_telegram": fake_send,
@@ -137,7 +142,8 @@ class SpotlightFileOrderTest(unittest.TestCase):
         saved = rr.gh_get
         rr.gh_get = fake_gh_get
         try:
-            out = rr.spotlight_source(repo("proj"))
+            paths = rr.repo_tree_paths(repo("proj"))
+            out = rr.spotlight_source(repo("proj"), paths)
         finally:
             rr.gh_get = saved
 
@@ -244,6 +250,131 @@ class TrimDiffTest(unittest.TestCase):
         out = rr.trim_diff(big, budget=200)
         self.assertTrue(out.startswith("diff --git a/app.py"))
         self.assertIn("truncated for size", out)
+
+
+# --- (h) hygiene, debt, CI health, week in code ---------------------------------
+
+class HygieneTest(unittest.TestCase):
+
+    def test_full_marks_and_missing_named(self):
+        r = dict(repo("proj"), description="does things", topics=["python"])
+        paths = ["README.md", "LICENSE", "tests/test_app.py",
+                 ".github/workflows/ci.yml", ".gitignore", "app.py"]
+        line = rr.hygiene_score(r, paths)
+        self.assertIn("7/7", line)
+        self.assertNotIn("missing", line)
+
+        bare = dict(repo("proj"), description="", topics=[])
+        line = rr.hygiene_score(bare, ["app.py"])
+        self.assertIn("0/7", line)
+        self.assertIn("README", line)
+        self.assertIn("license", line)
+
+    def test_test_files_detected_both_conventions(self):
+        r = dict(repo("p"), description="d", topics=["t"])
+        self.assertNotIn("tests", rr.hygiene_score(r, ["test_app.py"]).split("missing:")[-1])
+        self.assertNotIn("tests", rr.hygiene_score(r, ["tests/app.py"]).split("missing:")[-1])
+
+
+class DebtMarkersTest(unittest.TestCase):
+
+    SRC = ("--- app.py ---\n# TODO: fix this\nx = 1  # FIXME\n\n"
+           "--- lib.py ---\n# HACK around API\n")
+
+    def test_counts_per_file(self):
+        line = rr.debt_markers(self.SRC)
+        self.assertIn("3 TODO/FIXME", line)
+        self.assertIn("app.py×2", line)
+        self.assertIn("lib.py", line)
+
+    def test_clean_source_is_quiet(self):
+        self.assertEqual(rr.debt_markers("--- app.py ---\nx = 1\n"), "")
+
+
+class CiHealthTest(unittest.TestCase):
+
+    def _with_runs(self, runs_by_repo, repos):
+        def fake(path, accept="", **params):
+            name = path.split("/repos/me/", 1)[1].split("/", 1)[0]
+            return FakeResp(json_data={"workflow_runs": runs_by_repo.get(name, [])})
+        saved = rr.gh_get
+        rr.gh_get = fake
+        try:
+            return rr.ci_health(repos)
+        finally:
+            rr.gh_get = saved
+
+    def test_failing_repo_reported_with_link(self):
+        out = self._with_runs(
+            {"a": [{"conclusion": "failure", "name": "Tests",
+                    "html_url": "https://x/run"}],
+             "b": [{"conclusion": "success", "name": "Tests"}]},
+            [repo("a"), repo("b")],
+        )
+        self.assertIn("🔴 CI HEALTH", out)
+        self.assertIn("a: Tests failure", out)
+        self.assertIn("https://x/run", out)
+        self.assertNotIn("b:", out)
+
+    def test_all_green_is_silent(self):
+        out = self._with_runs(
+            {"a": [{"conclusion": "success", "name": "T"}], "b": []},
+            [repo("a"), repo("b")],
+        )
+        self.assertEqual(out, "")
+
+
+class WeekInCodeTest(unittest.TestCase):
+
+    def test_rolls_up_activity_and_prs(self):
+        state = {"activity": {
+            "2026-07-06": {"a": 3, "b": 1},
+            "2026-07-07": {"a": 2},
+        }}
+        def fake(path, accept="", **params):
+            if path.endswith("/pulls"):
+                return FakeResp(json_data=[{
+                    "number": 7, "title": "Add ledger",
+                    "created_at": "2026-07-01T00:00:00Z"}])
+            return FakeResp(json_data=[{"name": "main"}])
+        saved = rr.gh_get
+        rr.gh_get = fake
+        try:
+            out = rr.week_in_code(state, [repo("a")])
+        finally:
+            rr.gh_get = saved
+        self.assertIn("6 commits across 2 repos", out)
+        self.assertIn("a#7", out)
+        self.assertIn("Add ledger", out)
+        self.assertNotIn("extra branches", out)  # only main exists
+
+    def test_empty_memory_and_clean_repos_is_quiet(self):
+        def fake(path, accept="", **params):
+            return FakeResp(json_data=[] if path.endswith("/pulls")
+                            else [{"name": "main"}])
+        saved = rr.gh_get
+        rr.gh_get = fake
+        try:
+            out = rr.week_in_code({"activity": {}}, [repo("a")])
+        finally:
+            rr.gh_get = saved
+        self.assertEqual(out, "")
+
+    def test_load_state_prunes_old_activity(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = rr.STATE_FILE
+            rr.STATE_FILE = Path(tmp) / "findings.json"
+            try:
+                rr.STATE_FILE.write_text(_json.dumps(
+                    {"activity": {today: {"a": 1}, "2020-01-01": {"b": 2}}}))
+                state = rr.load_state()
+            finally:
+                rr.STATE_FILE = saved
+        self.assertEqual(list(state["activity"]), [today])
 
 
 # --- (g) rising repos -----------------------------------------------------------
