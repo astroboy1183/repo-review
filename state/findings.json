@@ -1,4 +1,25 @@
 {
+ "activity": {
+  "2026-07-11": {
+   "astroboy1183": 10,
+   "common": 1,
+   "cricket-scores": 4,
+   "daily-review": 3,
+   "eng-blogs": 3,
+   "finance-tracker": 3,
+   "fleet-scheduler": 7,
+   "housekeeper": 1,
+   "mail-digest": 5,
+   "markets-brief": 2,
+   "news-briefing": 9,
+   "papers-digest": 2,
+   "release-radar": 2,
+   "repo-review": 5,
+   "study-coach": 3,
+   "tech-news": 6,
+   "weather-report": 4
+  }
+ },
  "daily": [
   {
    "date": "2026-07-08",
@@ -51,11 +72,35 @@
     "study-coach": "state updated; resolve_topic substring matching + docstring mismatch still present",
     "weather-report": "ask_llm guards empty responses across 8 repos; consider shared module to avoid copy-paste"
    }
+  },
+  {
+   "date": "2026-07-11",
+   "findings": {
+    "astroboy1183": "Fleet consolidated to 06:00 IST morning; architecture doc clear; state persistence pattern documented",
+    "common": "ask_llm guards + thinking=disabled; shared module extraction would reduce copy-paste across 14 agents",
+    "cricket-scores": "Three editions dispatched cleanly; ask_llm guards + test coverage good",
+    "daily-review": "Cloud agent guard now 06:00 IST; 105-min grace window rationale undocumented",
+    "eng-blogs": "Feed errors still conflate timeout/network/HTTP; retime + state commit solid",
+    "finance-tracker": "Ledger committed; LARGE_TXN_THRESHOLD empty fallback needs comment on `or` logic",
+    "housekeeper": "Retimed to 06:00 IST; vault staleness check redundant AND still present",
+    "mail-digest": "vip_block() missing .get('vip'); _LINK_RE undocumented; ledger + edition guard solid",
+    "markets-brief": "query fallback conflates exceptions; retime + guards solid",
+    "news-briefing": "Evening wrap silent logic undocumented; NEWS_WATCH watchlist secret undocumented",
+    "papers-digest": "ask_llm guards in place; no other findings",
+    "release-radar": "_parse_published() fragile to +0000 format; ask_llm guards solid",
+    "repo-review": "ask_llm guards + thinking=disabled; CI health/hygiene/debt markers added; README drift on spotlight input flexibility",
+    "study-coach": "resolve_topic() substring matching vs docstring claim mismatch still present; state updated",
+    "tech-news": "Two editions with 3-hour deduping; TECH_WATCH watchlist feature undocumented in README",
+    "weather-report": "is_severe() function not visible in diff; confirm presence; ask_llm guards solid"
+   }
   }
  ],
  "rising": {
+  "514-labs/dnsglobe": "2026-07-11",
   "MaximeRivest/riddle": "2026-07-11",
+  "Robbyant/lingbot-world-v2": "2026-07-11",
   "Shpigford/knockoff": "2026-07-11",
+  "oso95/scroll-world": "2026-07-11",
   "withmarbleapp/os-taxonomy": "2026-07-11"
  },
  "spotlights": {
@@ -66,6 +111,10 @@
   "markets-brief": {
    "date": "2026-07-10",
    "notes": "markets-brief is a clean, deterministic Telegram agent (Yahoo Finance quotes, no LLM) with solid offline unit tests and a well-reasoned dual-cron dedupe guard in CI. Main findings: quote()'s dual-host fallback swallows which host/symbol failed (diagnosability gap), send_telegram's chunk-retry has an undocumented partial-send edge case, and main()'s per-symbol failure isolation lacks a dedicated test. No prior notes to follow up on \u2014 this is the first review of this repo."
+  },
+  "news-briefing": {
+   "date": "2026-07-11",
+   "notes": "news-briefing: solid two-stage LLM pipeline with strong defensive design (link validation, dual seen/briefed memory, non-fatal enrichments). Found test_links.py truncated/broken as shown, a token-based link validator that may miss markdown-style [text](url) injection, and redundant duplicate fetches for og:image + article text on the same URL. No prior notes to follow up on."
   }
  }
 }
