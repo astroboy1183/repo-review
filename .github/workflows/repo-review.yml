@@ -114,7 +114,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          # The 22:15 watchdog only notices tonight — this pings the moment
+          # The morning watchdog (housekeeper) only notices tomorrow — this pings the moment
           # a run dies, from this agent's own bot, with a link to the log.
           curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
             -d chat_id="$TELEGRAM_CHAT_ID" \
