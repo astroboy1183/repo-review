@@ -53,6 +53,11 @@
    }
   }
  ],
+ "rising": {
+  "MaximeRivest/riddle": "2026-07-11",
+  "Shpigford/knockoff": "2026-07-11",
+  "withmarbleapp/os-taxonomy": "2026-07-11"
+ },
  "spotlights": {
   "databricksrepo": {
    "date": "2026-07-08",

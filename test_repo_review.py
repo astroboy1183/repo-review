@@ -246,6 +246,55 @@ class TrimDiffTest(unittest.TestCase):
         self.assertIn("truncated for size", out)
 
 
+# --- (g) rising repos -----------------------------------------------------------
+
+class RisingReposTest(unittest.TestCase):
+    """The deterministic weekly-stars garnish: new repos show once, ever."""
+
+    def _payload(self, *names):
+        return {"items": [
+            {"full_name": n, "stargazers_count": 500, "description": "d",
+             "html_url": f"https://github.com/{n}"} for n in names
+        ]}
+
+    def test_new_repos_shown_remembered_skipped(self):
+        saved = rr.gh_get
+        rr.gh_get = lambda *a, **k: FakeResp(json_data=self._payload("a/one", "b/two"))
+        try:
+            text, new = rr.rising_repos(shown={"a/one": "2026-07-10"})
+        finally:
+            rr.gh_get = saved
+        self.assertNotIn("a/one", text)
+        self.assertIn("b/two", text)
+        self.assertIn("★500", text)
+        self.assertEqual(list(new), ["b/two"])
+
+    def test_nothing_new_is_quiet(self):
+        saved = rr.gh_get
+        rr.gh_get = lambda *a, **k: FakeResp(json_data=self._payload("a/one"))
+        try:
+            out = rr.rising_repos(shown={"a/one": "2026-07-10"})
+        finally:
+            rr.gh_get = saved
+        self.assertEqual(out, ("", {}))
+
+    def test_load_state_prunes_old_rising_entries(self):
+        import json as _json
+        import tempfile
+        from pathlib import Path
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        with tempfile.TemporaryDirectory() as tmp:
+            saved = rr.STATE_FILE
+            rr.STATE_FILE = Path(tmp) / "findings.json"
+            try:
+                rr.STATE_FILE.write_text(_json.dumps(
+                    {"rising": {"a/b": today, "c/d": "2020-01-01"}}))
+                state = rr.load_state()
+            finally:
+                rr.STATE_FILE = saved
+        self.assertEqual(list(state["rising"]), ["a/b"])
+
+
 # --- (f) memory tail ----------------------------------------------------------
 
 class SplitStateTest(unittest.TestCase):

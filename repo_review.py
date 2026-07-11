@@ -11,6 +11,9 @@ my GitHub account:
     deep review every couple of weeks
   - on Sundays (or with REVIEW_CURATE=1): a PORTFOLIO section — which
     repos to keep, which to finish, which to archive or delete
+  - 📈 RISING REPOS: new GitHub repos that crossed a star threshold this
+    week (search API, deterministic) — what the ecosystem is excited
+    about, each repo shown exactly once (state-remembered)
   - one small suggestion for tomorrow
 
 The agent keeps MEMORY (state/findings.json, committed back to this repo
@@ -58,6 +61,12 @@ CURATION_WEEKDAY = 6  # Sunday — keep/finish/delete advice changes slowly
 CODE_EXT = (".py", ".sql", ".sh", ".js", ".ts")
 DOC_EXT = (".md", ".yml", ".yaml", ".toml")
 SOURCE_EXT = CODE_EXT + DOC_EXT
+
+# Rising-repos garnish: new repos gaining stars fast, shown once ever.
+RISING_WINDOW_DAYS = 7
+RISING_MIN_STARS = 300
+RISING_CAP = 3
+RISING_KEEP_DAYS = 60  # prune remembered repos after this
 
 # Review memory. The workflow commits this file back to the repo after each
 # run, so tomorrow's review knows what today's said.
@@ -205,6 +214,39 @@ def spotlight_source(repo):
     return "\n\n".join(picked)
 
 
+def rising_repos(shown):
+    """📈 RISING REPOS — new GitHub repos crossing RISING_MIN_STARS this
+    week, via the search API (same read token as the reviews).
+
+    Deterministic, and the state memory ensures a repo is shown exactly
+    once. Returns (block text, {full_name: date} of newly shown).
+    ('', {}) when quiet — and the caller treats any failure the same
+    way: a garnish must never sink the review."""
+    since = (
+        datetime.now(timezone.utc) - timedelta(days=RISING_WINDOW_DAYS)
+    ).strftime("%Y-%m-%d")
+    items = gh_get(
+        "/search/repositories",
+        q=f"created:>{since} stars:>{RISING_MIN_STARS}",
+        sort="stars",
+        order="desc",
+        per_page=10,
+    ).json().get("items", [])
+    fresh = [i for i in items if i.get("full_name") not in shown][:RISING_CAP]
+    if not fresh:
+        return "", {}
+    today = datetime.now(IST).strftime("%Y-%m-%d")
+    lines = ["📈 RISING REPOS — new this week"]
+    for i in fresh:
+        desc = " ".join((i.get("description") or "").split())[:100]
+        lines.append(
+            f"• {i['full_name']} ★{i.get('stargazers_count', 0)}"
+            + (f" — {desc}" if desc else "")
+        )
+        lines.append(f"  {i.get('html_url', '')}")
+    return "\n".join(lines), {i["full_name"]: today for i in fresh}
+
+
 def repo_inventory(repos):
     """One metadata line per repo — enough to judge keep/finish/delete."""
     return "\n".join(
@@ -227,6 +269,14 @@ def load_state():
         state = {}
     state.setdefault("daily", [])
     state.setdefault("spotlights", {})
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=RISING_KEEP_DAYS)
+    ).strftime("%Y-%m-%d")
+    state["rising"] = {
+        k: v
+        for k, v in state.get("rising", {}).items()
+        if isinstance(v, str) and v >= cutoff
+    }
     return state
 
 
@@ -439,6 +489,15 @@ def main():
     deep_text, deep_mem = split_state(reply)
 
     body = changes_text + "\n\n" + deep_text
+
+    # Deterministic garnish: what the ecosystem is starring this week.
+    try:
+        rising_text, rising_new = rising_repos(state.get("rising", {}))
+    except Exception:
+        rising_text, rising_new = "", {}  # never sink the review
+    if rising_text:
+        body += "\n\n" + rising_text
+
     if failed:
         body += "\n\n⚠️ Could not check: " + ", ".join(failed)
     header = (
@@ -460,6 +519,7 @@ def main():
             "date": today,
             "notes": str(deep_mem["spotlight"])[:1500],
         }
+    state.setdefault("rising", {}).update(rising_new)
     try:
         save_state(state)
     except OSError:
